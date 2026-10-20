@@ -1,0 +1,56 @@
+name: Validate Export As Clippy
+run-name: Clippy PR 7985 at ${{ inputs.source_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact public PhotoCraft contribution commit
+        required: true
+        type: string
+        default: 397b984ebc295121d21b65fa64efbda1e531859b
+
+permissions:
+  contents: read
+
+jobs:
+  clippy:
+    name: Clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_BUILD_JOBS: "4"
+      CARGO_TERM_COLOR: always
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Verify exact source commit
+        env:
+          EXPECTED_SHA: ${{ inputs.source_sha }}
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          git show --no-patch --format=fuller HEAD
+          test -z "$(git status --porcelain)"
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev \
+            libgl1-mesa-dev libgtk-3-dev
+      - name: Install pinned Rust and Clippy
+        run: rustup toolchain install 1.95.0 --profile minimal --component clippy
+      - name: Clippy
+        run: cargo +1.95.0 clippy -p photocraft-ui-egui --all-targets --locked -- -D warnings
