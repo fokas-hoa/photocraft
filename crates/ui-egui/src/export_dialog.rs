@@ -385,6 +385,9 @@ fn settings(f: &Map<String, Value>) -> ExportSettings {
     let metadata = s(f, "metadata");
     ExportSettings {
         jpeg_quality: (fmt == "jpg").then_some(quality),
+        // Chroma subsampling blurs saturated text and transparent graphics after compositing,
+        // even at quality 100. Export As keeps colour at the same resolution as luminance.
+        jpeg_chroma_subsampling: fmt != "jpg",
         webp_lossless: fmt != "webp" || lossless(f),
         webp_quality: (fmt == "webp" && !lossless(f)).then_some(quality),
         xmp_all: metadata == "all",
@@ -1066,6 +1069,50 @@ mod tests {
         let proxy = export_document(&doc, &f, Some(40)).unwrap();
         assert_eq!(proxy.size.width, 40);
         assert_eq!(settings(&f).jpeg_quality, Some(85));
+    }
+
+    /// JPEG must keep the colour detail of a transparent graphic over its background,
+    /// even when the graphic has one-pixel-wide saturated strokes.
+    #[test]
+    fn jpeg_export_preserves_fine_colour_edges() {
+        use photocraft_doc::{Color, ColorMode, Layer, SampleType, Size};
+        use photocraft_geom::Rect;
+
+        for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+            let mut doc = Document::with_background("colour detail", Size::new(32, 16), ColorMode::Rgb, depth, Color::WHITE);
+            let mut graphic = Layer::raster("transparent graphic", doc.pixel_format());
+            for x in (0..32).step_by(2) {
+                graphic.surface_mut().unwrap().fill_rect(Rect::from_xywh(x, 0, 1, 16), &[1.0, 0.0, 0.0, 1.0]);
+            }
+            doc.layers.push(graphic);
+            let before = doc.clone();
+            let fields = json!({"format": "jpg", "quality": 100, "scale": 100}).as_object().unwrap().clone();
+            let out = export_document(&doc, &fields, None).unwrap();
+            let encoded = photocraft_io::export(&out, "detail.jpg", &settings(&fields).io_options()).unwrap();
+            let decoded = photocraft_codecs::decode(&encoded.bytes).unwrap().convert(photocraft_codecs::ChannelLayout::Rgb, photocraft_codecs::SampleType::U8);
+            assert_eq!(decoded.dimensions(), (32, 16));
+            let mut max_error = 0;
+            for (i, pixel) in decoded.data().chunks_exact(3).enumerate() {
+                let expected: [u8; 3] = if i % 32 % 2 == 0 { [255, 0, 0] } else { [255, 255, 255] };
+                for (actual, expected) in pixel.iter().zip(expected) {
+                    max_error = max_error.max(actual.abs_diff(expected));
+                }
+            }
+            assert!(max_error <= 8, "{depth:?}: JPEG at quality 100 loses colour detail by {max_error} levels");
+            assert_eq!(doc, before, "export leaves the layered source unchanged");
+        }
+    }
+
+    #[test]
+    fn jpeg_export_settings_keep_full_chroma_at_every_quality() {
+        for quality in [1, 50, 51, 85, 100] {
+            let fields = json!({"format": "jpg", "quality": quality}).as_object().unwrap().clone();
+            let options = settings(&fields).io_options();
+            assert_eq!(options.encode.jpeg_quality, quality);
+            assert!(!options.encode.jpeg_chroma_subsampling);
+        }
+        // Save As retains the codec's existing sampling default.
+        assert!(ExportSettings::default().io_options().encode.jpeg_chroma_subsampling);
     }
 
     /// #1353: a scale that changes only the height (the width rounds back to the original)
