@@ -8,7 +8,7 @@ on:
         description: Exact public PhotoCraft contribution commit
         required: true
         type: string
-        default: 397b984ebc295121d21b65fa64efbda1e531859b
+        default: aeada1776e8024ef6a602bde21d70250c414fdc7
 
 permissions:
   contents: read
@@ -27,6 +27,8 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_BUILD_JOBS: "4"
       CARGO_TERM_COLOR: always
+      PHOTOCRAFT_NO_PRINT: "1"
+      LPDEST: photocraft-no-such-printer
     defaults:
       run:
         shell: bash
@@ -54,3 +56,6 @@ jobs:
         run: rustup toolchain install 1.95.0 --profile minimal --component clippy
       - name: Clippy
         run: cargo +1.95.0 clippy -p photocraft-ui-egui --all-targets --locked -- -D warnings
+      - name: UI crate tests
+        if: runner.os == 'Linux'
+        run: cargo +1.95.0 test -p photocraft-ui-egui --locked
