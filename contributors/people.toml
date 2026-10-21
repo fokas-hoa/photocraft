@@ -182,5 +182,9 @@ sync_github_name = true
 [people.00xJS]
 sync_github_name = true
 
+[people.guillehr2]
+real_name = "Guillem Hermida"
+sync_github_name = true
+
 [people.fokas-hoa]
 display_name = "Tasos Fokas"
