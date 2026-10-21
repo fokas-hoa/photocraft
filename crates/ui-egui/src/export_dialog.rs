@@ -1071,6 +1071,58 @@ mod tests {
         assert_eq!(settings(&f).jpeg_quality, Some(85));
     }
 
+    /// Read the main JPEG frame, skipping complete segments rather than searching marker bytes:
+    /// APP metadata can contain a thumbnail JPEG with its own frame and different sampling.
+    fn jpeg_sampling_factors(bytes: &[u8]) -> [(u8, u8); 3] {
+        assert_eq!(bytes.get(..2), Some([0xff, 0xd8].as_slice()), "JPEG SOI");
+        let mut offset = 2;
+        loop {
+            assert_eq!(bytes.get(offset), Some(&0xff), "JPEG marker prefix");
+            while bytes.get(offset) == Some(&0xff) {
+                offset += 1;
+            }
+            let marker = *bytes.get(offset).expect("JPEG marker");
+            offset += 1;
+            match marker {
+                0x01 | 0xd0..=0xd8 => continue, // Standalone markers have no length.
+                0x00 | 0xd9 | 0xda => panic!("JPEG has no frame before scan/end"),
+                _ => {}
+            }
+            let length_bytes = bytes.get(offset..offset + 2).expect("JPEG segment length");
+            let length = usize::from(u16::from_be_bytes([length_bytes[0], length_bytes[1]]));
+            assert!(length >= 2, "JPEG segment length includes its two length bytes");
+            let end = offset.checked_add(length).expect("JPEG segment end");
+            let segment = bytes.get(offset + 2..end).expect("complete JPEG segment");
+            if matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) {
+                assert_eq!(segment.get(5), Some(&3), "JPEG frame must have three components");
+                assert_eq!(segment.len(), 6 + 3 * 3, "JPEG frame component descriptors");
+                return std::array::from_fn(|i| {
+                    let sampling = segment[6 + 3 * i + 1];
+                    (sampling >> 4, sampling & 0x0f)
+                });
+            }
+            offset = end;
+        }
+    }
+
+    #[test]
+    fn jpeg_export_sampling_skips_embedded_thumbnail() {
+        // An APP segment contains an entire 4:2:0 thumbnail; the main frame is 4:4:4.
+        let frame_420 = [0xff, 0xc0, 0, 17, 8, 0, 1, 0, 1, 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1];
+        let mut thumbnail = vec![0xff, 0xd8];
+        thumbnail.extend_from_slice(&frame_420);
+        thumbnail.extend_from_slice(&[0xff, 0xd9]);
+        assert_eq!(jpeg_sampling_factors(&thumbnail), [(2, 2), (1, 1), (1, 1)]);
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1];
+        jpeg.extend_from_slice(&u16::try_from(thumbnail.len() + 2).unwrap().to_be_bytes());
+        jpeg.extend_from_slice(&thumbnail);
+        jpeg.push(0xff); // Marker fill byte before the main frame.
+        let mut frame_444 = frame_420;
+        frame_444[11] = 0x11;
+        jpeg.extend_from_slice(&frame_444);
+        assert_eq!(jpeg_sampling_factors(&jpeg), [(1, 1); 3]);
+    }
+
     /// JPEG must keep the colour detail of a transparent graphic over its background,
     /// even when the graphic has one-pixel-wide saturated strokes.
     #[test]
@@ -1086,20 +1138,27 @@ mod tests {
             }
             doc.layers.push(graphic);
             let before = doc.clone();
-            let fields = json!({"format": "jpg", "quality": 100, "scale": 100}).as_object().unwrap().clone();
-            let out = export_document(&doc, &fields, None).unwrap();
-            let encoded = photocraft_io::export(&out, "detail.jpg", &settings(&fields).io_options()).unwrap();
-            let decoded = photocraft_codecs::decode(&encoded.bytes).unwrap().convert(photocraft_codecs::ChannelLayout::Rgb, photocraft_codecs::SampleType::U8);
-            assert_eq!(decoded.dimensions(), (32, 16));
-            let mut max_error = 0;
-            for (i, pixel) in decoded.data().chunks_exact(3).enumerate() {
-                let expected: [u8; 3] = if i % 32 % 2 == 0 { [255, 0, 0] } else { [255, 255, 255] };
-                for (actual, expected) in pixel.iter().zip(expected) {
-                    max_error = max_error.max(actual.abs_diff(expected));
+            for quality in [1, 50, 51, 85, 100] {
+                let fields = json!({"format": "jpg", "quality": quality, "scale": 100}).as_object().unwrap().clone();
+                let out = export_document(&doc, &fields, None).unwrap();
+                let encoded = photocraft_io::export(&out, "detail.jpg", &settings(&fields).io_options()).unwrap();
+                assert_eq!(jpeg_sampling_factors(&encoded.bytes), [(1, 1); 3], "{depth:?}, quality {quality}: JPEG must be 4:4:4");
+                let decoded =
+                    photocraft_codecs::decode(&encoded.bytes).unwrap().convert(photocraft_codecs::ChannelLayout::Rgb, photocraft_codecs::SampleType::U8);
+                assert_eq!(decoded.dimensions(), (32, 16), "{depth:?}, quality {quality}");
+                // Lower qualities also lose detail to quantization, independently of chroma sampling.
+                if quality == 100 {
+                    let mut max_error = 0;
+                    for (i, pixel) in decoded.data().chunks_exact(3).enumerate() {
+                        let expected: [u8; 3] = if i % 32 % 2 == 0 { [255, 0, 0] } else { [255, 255, 255] };
+                        for (actual, expected) in pixel.iter().zip(expected) {
+                            max_error = max_error.max(actual.abs_diff(expected));
+                        }
+                    }
+                    assert!(max_error <= 8, "{depth:?}: JPEG at quality 100 loses colour detail by {max_error} levels");
                 }
+                assert_eq!(doc, before, "{depth:?}, quality {quality}: export leaves the layered source unchanged");
             }
-            assert!(max_error <= 8, "{depth:?}: JPEG at quality 100 loses colour detail by {max_error} levels");
-            assert_eq!(doc, before, "export leaves the layered source unchanged");
         }
     }
 
