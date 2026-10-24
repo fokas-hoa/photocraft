@@ -1604,7 +1604,7 @@ mod tests {
                 // Lower qualities also lose detail to quantization, independently of chroma sampling.
                 if quality == 100 {
                     let mut max_error = 0;
-                    for (i, pixel) in decoded.data().chunks_exact(3).enumerate() {
+                    for (i, pixel) in decoded.data().as_chunks::<3>().0.iter().enumerate() {
                         let expected: [u8; 3] = if i % 32 % 2 == 0 { [255, 0, 0] } else { [255, 255, 255] };
                         for (actual, expected) in pixel.iter().zip(expected) {
                             max_error = max_error.max(actual.abs_diff(expected));
