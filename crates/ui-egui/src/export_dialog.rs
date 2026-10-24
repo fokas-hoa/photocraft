@@ -427,9 +427,9 @@ fn settings(f: &Map<String, Value>) -> ExportSettings {
     let metadata = s(f, "metadata");
     ExportSettings {
         jpeg_quality: (fmt == "jpg").then_some(quality),
-        // Chroma subsampling blurs saturated text and transparent graphics after compositing,
-        // even at quality 100. Export As keeps colour at the same resolution as luminance.
-        jpeg_chroma_subsampling: fmt != "jpg",
+        // Photoshop Export As subsamples at low quality and keeps full chroma at high quality.
+        // Use the same 1-100 cutoff as Save for Web; Photoshop's modern 1-7 scale is different.
+        jpeg_chroma_subsampling: fmt != "jpg" || quality <= 50,
         webp_lossless: fmt != "webp" || lossless(f),
         webp_quality: (fmt == "webp" && !lossless(f)).then_some(quality),
         xmp_all: metadata == "all",
@@ -1578,8 +1578,8 @@ mod tests {
         assert_eq!(jpeg_sampling_factors(&jpeg), [(1, 1); 3]);
     }
 
-    /// JPEG must keep the colour detail of a transparent graphic over its background,
-    /// even when the graphic has one-pixel-wide saturated strokes.
+    /// High-quality JPEG must keep the colour detail of a transparent graphic over its background;
+    /// lower qualities use chroma subsampling, including at the quality-50 boundary.
     #[test]
     fn jpeg_export_preserves_fine_colour_edges() {
         use photocraft_doc::{Color, ColorMode, Layer, SampleType, Size};
@@ -1597,7 +1597,8 @@ mod tests {
                 let fields = json!({"format": "jpg", "quality": quality, "scale": 100}).as_object().unwrap().clone();
                 let out = export_document(&doc, &fields, None).unwrap();
                 let encoded = photocraft_io::export(&out, "detail.jpg", &settings(&fields).io_options()).unwrap();
-                assert_eq!(jpeg_sampling_factors(&encoded.bytes), [(1, 1); 3], "{depth:?}, quality {quality}: JPEG must be 4:4:4");
+                let expected_sampling = if quality <= 50 { [(2, 2), (1, 1), (1, 1)] } else { [(1, 1); 3] };
+                assert_eq!(jpeg_sampling_factors(&encoded.bytes), expected_sampling, "{depth:?}, quality {quality}: JPEG sampling");
                 let decoded =
                     photocraft_codecs::decode(&encoded.bytes).unwrap().convert(photocraft_codecs::ChannelLayout::Rgb, photocraft_codecs::SampleType::U8);
                 assert_eq!(decoded.dimensions(), (32, 16), "{depth:?}, quality {quality}");
@@ -1618,12 +1619,12 @@ mod tests {
     }
 
     #[test]
-    fn jpeg_export_settings_keep_full_chroma_at_every_quality() {
-        for quality in [1, 50, 51, 85, 100] {
+    fn jpeg_export_settings_follow_quality_sampling_cutoff() {
+        for quality in 1..=100 {
             let fields = json!({"format": "jpg", "quality": quality}).as_object().unwrap().clone();
             let options = settings(&fields).io_options();
             assert_eq!(options.encode.jpeg_quality, quality);
-            assert!(!options.encode.jpeg_chroma_subsampling);
+            assert_eq!(options.encode.jpeg_chroma_subsampling, quality <= 50, "quality {quality}");
         }
         // Save As retains the codec's existing sampling default.
         assert!(ExportSettings::default().io_options().encode.jpeg_chroma_subsampling);

@@ -335,7 +335,7 @@ pub struct ExportSettings {
     /// JPEG quality 1–100 (None = codec default).
     pub jpeg_quality: Option<u8>,
     /// JPEG chroma sampling: `true` is 4:2:0, `false` keeps full 4:4:4 colour detail.
-    /// Export As keeps full chroma so saturated text and graphics stay sharp.
+    /// Export As keeps full chroma above quality 50 so saturated text and graphics stay sharp.
     pub jpeg_chroma_subsampling: bool,
     /// JPEG Options › Format Options: baseline, baseline optimized or progressive.
     pub jpeg_format: photocraft_codecs::JpegFormat,
